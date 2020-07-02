@@ -1,7 +1,9 @@
 `default_nettype none
 module sg1000
 #(
-  parameter c_sdram       = 1 // 1:SDRAM, 0:BRAM 32K
+  parameter c_sdram       = 1, // 1:SDRAM, 0:BRAM 32K
+  parameter c_vga_out     = 0, // 0; Just HDMI, 1: VGA and HDMI
+  parameter c_diag        = 1  // 0: No led diagnostcs, 1: led diagnostics 
 )
 (
   input         clk25_mhz,
@@ -48,8 +50,15 @@ module sg1000
   output [7:0]  leds
 );
 
-  parameter c_vga_out = 0;
-  parameter c_diag = 1;
+  // Port numbers
+  wire [7:0] vdp_ctrl_port = 8'hbf;
+  wire [7:0] vdp_data_port = 8'hbe;
+
+  wire [7:0] psg_write_port = 8'h7f;
+
+  wire [7:0] ctrl_0_port = 8'hdc; // Not sure why there are 3 values
+  wire [7:0] ctrl_1_port = 8'hdd; // for these ports
+  wire [7:0] ctrl_2_port = 8'hde;
 
   // pull-ups for us2 connector 
   assign usb_fpga_pu_dp = 1;
@@ -300,8 +309,8 @@ module sg1000
   wire        vga_de;
   wire [7:0]  vga_dout;
   reg  [13:0] vga_addr;
-  wire        vga_wr = cpuAddress[7:0] == 8'hbe && n_ioWR == 1'b0;
-  wire        vga_rd = cpuAddress[7:0] == 8'hbe && n_ioRD == 1'b0;
+  wire        vga_wr = cpuAddress[7:0] == vdp_data_port && n_ioWR == 1'b0;
+  wire        vga_rd = cpuAddress[7:0] == vdp_data_port && n_ioRD == 1'b0;
   reg         is_second_addr_byte = 0;
   reg [7:0]   first_addr_byte;
   reg [7:0]   r_vdp [0:7];
@@ -326,19 +335,15 @@ module sg1000
       r_vga_rd <= vga_rd;
       if (r_vga_rd && !vga_rd) vga_addr <= vga_addr + 1;
 
-      if (cpuAddress[7:0] == 8'hbf && n_ioWR == 1'b0) begin
+      if (cpuAddress[7:0] == vdp_ctrl_port && n_ioWR == 1'b0) begin
         is_second_addr_byte <= ~is_second_addr_byte;
         if (is_second_addr_byte) begin
-          if (!cpuDataOut[7]) begin
+          if (!cpuDataOut[7])
             vga_addr <=  {cpuDataOut[5:0], first_addr_byte};
-          end else begin
-            if (cpuDataOut[5:0] < 8) begin
+          else if (cpuDataOut[5:0] < 8) 
               r_vdp[cpuDataOut[5:0]] <= first_addr_byte;
-            end
-          end
-        end else begin
+        end else
           first_addr_byte <= cpuDataOut;
-        end
       end
     end
   end
@@ -435,12 +440,12 @@ module sg1000
   wire [7:0] status = {r_interrupt_flag, too_many_sprites, r_sprite_collision, (too_many_sprites ? sprite5 : 5'b11111)};
   wire [7:0] joy_data = {~btn[2:1], ~btn[6:1]};
 
-  assign cpuDataIn =  cpuAddress[7:0] == 8'hbe && n_ioRD == 1'b0 ? vga_dout :
-                      cpuAddress[7:0] == 8'hbf && n_ioRD == 1'b0 ? status :
+  assign cpuDataIn =  cpuAddress[7:0] == vdp_data_port && n_ioRD == 1'b0 ? vga_dout :
+                      cpuAddress[7:0] == vdp_ctrl_port && n_ioRD == 1'b0 ? status :
 		      // Controllers 0 and 1
-		      cpuAddress[7:0] == 8'hdc && n_ioRD == 1'b0 ? joy_data :
-		      cpuAddress[7:0] == 8'hdd && n_ioRD == 1'b0 ? joy_data :
-		      cpuAddress[7:0] == 8'hde && n_ioRD == 1'b0 ? joy_data :
+		      cpuAddress[7:0] == ctrl_0_port && n_ioRD == 1'b0 ? joy_data :
+		      cpuAddress[7:0] == ctrl_1_port && n_ioRD == 1'b0 ? joy_data :
+		      cpuAddress[7:0] == ctrl_2_port && n_ioRD == 1'b0 ? joy_data :
                       cpuAddress[15:14] < 3    && n_memRD == 1'b0 ? romOut : ramOut;
 
   always @(posedge cpuClock) begin
@@ -451,8 +456,8 @@ module sg1000
       if (interrupt_flag) r_interrupt_flag <= 1;
       if (sprite_collision) r_sprite_collision <= 1;
       if (cpuClockEdge) begin
-        r_status_read <= cpuAddress[7:0] == 8'hbf && n_ioRD == 1'b0;
-        if (r_status_read && !(cpuAddress[7:0] == 8'hbf && n_ioRD == 1'b0)) begin
+        r_status_read <= cpuAddress[7:0] == vdp_ctrl_port && n_ioRD == 1'b0;
+        if (r_status_read && !(cpuAddress[7:0] == vdp_ctrl_port && n_ioRD == 1'b0)) begin
           r_interrupt_flag <= 0;
           r_sprite_collision <= 0;
         end
@@ -487,7 +492,7 @@ module sg1000
     .clk_en(cpuClockEnable),
     .reset(!n_hard_reset),
     .ce_n(1'b0),
-    .we_n(!(cpuAddress[7:0] == 8'h7f && n_ioWR == 1'b0)),
+    .we_n(!(cpuAddress[7:0] == psg_write_port && n_ioWR == 1'b0)),
     .ready(sound_ready),
     .d(cpuDataOut),
     .audio_out(sound_ao)
@@ -499,7 +504,6 @@ module sg1000
   // ===============================================================
   assign leds = {!n_hard_reset, mode};
 
-  //always @(posedge cpuClock) diag16 <= pc;
-  always @(posedge cpuClock) if (n_ioRD == 1'b0 && diag16 == 0 && cpuAddress[7:0] != 8'hbf && cpuAddress[7:0] != 8'hbe && cpuAddress[7:0] != 8'hde && cpuAddress[7:0] != 8'hdd && cpuAddress[7:0] != 8'hdc) diag16 <= cpuAddress[7:0];
+  always @(posedge cpuClock) diag16 <= pc;
 
 endmodule
